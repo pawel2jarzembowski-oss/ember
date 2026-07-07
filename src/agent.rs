@@ -2,7 +2,7 @@
 //! replies with plain text, mirroring the same loop used by editor-integrated agents.
 
 use crate::ollama::{ChatMessage, OllamaClient, Usage};
-use crate::tools::{run_tool, tool_defs};
+use crate::tools::{run_tool, tool_defs, Confirm, Permissions};
 use std::path::PathBuf;
 
 const SYSTEM_PROMPT: &str = "You are Ember, an autonomous coding agent running in a terminal, fully locally. \
@@ -24,35 +24,35 @@ pub struct Agent {
     history: Vec<ChatMessage>,
     root: PathBuf,
     max_steps: usize,
-    auto_approve: bool,
 }
 
 impl Agent {
-    pub fn new(root: PathBuf, max_steps: usize, auto_approve: bool) -> Self {
-        Self { history: vec![ChatMessage::system(SYSTEM_PROMPT)], root, max_steps, auto_approve }
+    pub fn new(root: PathBuf, max_steps: usize) -> Self {
+        Self { history: vec![ChatMessage::system(SYSTEM_PROMPT)], root, max_steps }
     }
 
     pub fn reset(&mut self) {
         self.history = vec![ChatMessage::system(SYSTEM_PROMPT)];
     }
 
-    /// Runs one full turn, calling `on_event` for everything the UI should react to, and
-    /// `confirm` before any mutating tool call when auto-approve is off.
-    pub async fn send(
+    /// Runs one full turn, calling `on_event` for everything the UI should react to. `perms` is
+    /// re-read by value once per tool call (a fresh snapshot), so toggling a mode mid-turn takes
+    /// effect on the very next tool call. `confirm` is only actually invoked for categories set
+    /// to `Ask` — see `tools::gate`.
+    pub async fn send<C: Confirm>(
         &mut self,
         user_text: &str,
         client: &OllamaClient,
+        perms: impl Fn() -> Permissions,
+        confirm: &C,
         mut on_event: impl FnMut(AgentEvent),
-        mut confirm: impl FnMut(&str) -> bool,
     ) -> anyhow::Result<()> {
         self.history.push(ChatMessage::user(user_text));
 
         for _ in 0..self.max_steps {
             let tools = tool_defs();
-            let mut acc = String::new();
             let res = client
                 .chat_stream(&self.history, &tools, |delta| {
-                    acc.push_str(delta);
                     on_event(AgentEvent::AssistantDelta(delta.to_string()));
                 })
                 .await?;
@@ -80,8 +80,7 @@ impl Agent {
                 let name = tc.function.name.clone();
                 let args = tc.function.arguments.clone();
                 on_event(AgentEvent::ToolStart { name: name.clone(), args: args.to_string() });
-                let auto_approve = self.auto_approve;
-                let result = run_tool(&name, &args, &self.root, |msg| auto_approve || confirm(msg));
+                let result = run_tool(&name, &args, &self.root, perms(), confirm).await;
                 on_event(AgentEvent::ToolResult { name: name.clone(), result: result.clone() });
                 let call_id = tc.id.clone().unwrap_or_else(|| "call_0".to_string());
                 self.history.push(ChatMessage::tool(result, call_id));

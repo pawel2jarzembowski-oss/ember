@@ -1,6 +1,8 @@
 //! TUI application state and how it reacts to agent/terminal events.
 
 use crate::agent::AgentEvent;
+use crate::tools::PermLevel;
+use tokio::sync::oneshot;
 
 pub enum Msg {
     User(String),
@@ -12,6 +14,9 @@ pub enum AppEvent {
     Agent(AgentEvent),
     TurnFinished(Option<String>),
     Connected(bool),
+    /// The agent wants to do something gated by an `Ask` permission — the UI shows `message`
+    /// and, once the user presses y/n, sends the answer back down `respond`.
+    ConfirmRequest { message: String, respond: oneshot::Sender<bool> },
 }
 
 pub struct App {
@@ -24,6 +29,9 @@ pub struct App {
     pub scroll: u16,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub write_perm: PermLevel,
+    pub command_perm: PermLevel,
+    pub pending_confirm: Option<(String, oneshot::Sender<bool>)>,
     current_assistant: Option<usize>,
     open_tool: Option<usize>,
     pub should_quit: bool,
@@ -41,6 +49,9 @@ impl App {
             scroll: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            write_perm: PermLevel::Auto,
+            command_perm: PermLevel::Auto,
+            pending_confirm: None,
             current_assistant: None,
             open_tool: None,
             should_quit: false,
@@ -48,13 +59,20 @@ impl App {
     }
 
     pub fn submit(&mut self) -> Option<String> {
-        if self.busy || self.input.trim().is_empty() {
+        if self.busy || self.pending_confirm.is_some() || self.input.trim().is_empty() {
             return None;
         }
         let text = std::mem::take(&mut self.input);
         self.messages.push(Msg::User(text.clone()));
         self.busy = true;
         Some(text)
+    }
+
+    /// Resolves the pending confirmation (if any) with the user's y/n answer.
+    pub fn answer_confirm(&mut self, approved: bool) {
+        if let Some((_, respond)) = self.pending_confirm.take() {
+            let _ = respond.send(approved);
+        }
     }
 
     pub fn handle_app_event(&mut self, ev: AppEvent) {
@@ -71,6 +89,9 @@ impl App {
             AppEvent::Connected(ok) => {
                 self.connected = ok;
                 self.status_detail = if ok { "connected".into() } else { "unreachable".into() };
+            }
+            AppEvent::ConfirmRequest { message, respond } => {
+                self.pending_confirm = Some((message, respond));
             }
         }
     }

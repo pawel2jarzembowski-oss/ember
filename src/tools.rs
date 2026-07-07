@@ -1,10 +1,85 @@
-//! Agent tools, sandboxed to the current working directory (protection against `../..`).
+//! Agent tools, sandboxed to the current working directory (protection against `../..`), and
+//! gated by per-category permission levels (auto / ask / deny) — see [`PermLevel`].
 
 use crate::ollama::{ToolDef, ToolDefFunction};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// How much the agent is allowed to do without a human in the loop, per category.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PermLevel {
+    /// Just do it — no prompt, the agent reports what it did afterward.
+    Auto,
+    /// Ask first — the UI shows a prompt and waits for y/n before proceeding.
+    Ask,
+    /// Never allowed — refused immediately, no prompt at all.
+    Deny,
+}
+
+impl PermLevel {
+    pub fn cycle(self) -> Self {
+        match self {
+            PermLevel::Auto => PermLevel::Ask,
+            PermLevel::Ask => PermLevel::Deny,
+            PermLevel::Deny => PermLevel::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PermLevel::Auto => "auto",
+            PermLevel::Ask => "ask",
+            PermLevel::Deny => "deny",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Some(PermLevel::Auto),
+            "ask" => Some(PermLevel::Ask),
+            "deny" => Some(PermLevel::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// Current permission level for each mutating tool category.
+#[derive(Clone, Copy, Debug)]
+pub struct Permissions {
+    pub write: PermLevel,
+    pub command: PermLevel,
+}
+
+impl Default for Permissions {
+    fn default() -> Self {
+        Self { write: PermLevel::Auto, command: PermLevel::Auto }
+    }
+}
+
+/// Asks the human a yes/no question and waits for the answer. Implemented once for real use
+/// (backed by the TUI, see `main.rs`) and once for tests (a fixed canned answer).
+pub trait Confirm {
+    fn ask(&self, message: String) -> impl Future<Output = bool> + Send;
+}
+
+/// A permission set to `Deny` never even calls `Confirm::ask` — this exists so tests can prove
+/// that (a confirmer that panics if asked would fail the test if deny leaked through).
+async fn gate<C: Confirm>(level: PermLevel, message: impl FnOnce() -> String, confirm: &C) -> Result<(), String> {
+    match level {
+        PermLevel::Deny => Err("REJECTED: disabled by settings (level = deny).".to_string()),
+        PermLevel::Auto => Ok(()),
+        PermLevel::Ask => {
+            if confirm.ask(message()).await {
+                Ok(())
+            } else {
+                Err("REJECTED: the user did not approve this.".to_string())
+            }
+        }
+    }
+}
 
 /// Resolves `rel` against `root`, refusing to escape it.
 fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf> {
@@ -88,14 +163,13 @@ pub fn tool_defs() -> Vec<ToolDef> {
     ]
 }
 
-/// Runs a tool call. `confirm` is invoked before anything that mutates state or runs a command;
-/// returning `false` rejects the action without doing it.
-pub fn run_tool(name: &str, args: &Value, root: &Path, confirm: impl FnOnce(&str) -> bool) -> String {
+/// Runs a tool call, gating write_file/run_command behind `perms` and `confirm`.
+pub async fn run_tool<C: Confirm>(name: &str, args: &Value, root: &Path, perms: Permissions, confirm: &C) -> String {
     match name {
         "read_file" => read_file(args, root),
-        "write_file" => write_file(args, root, confirm),
+        "write_file" => write_file(args, root, perms, confirm).await,
         "list_files" => list_files(args, root),
-        "run_command" => run_command(args, root, confirm),
+        "run_command" => run_command(args, root, perms, confirm).await,
         other => format!("ERROR: unknown tool \"{other}\""),
     }
 }
@@ -121,7 +195,7 @@ fn read_file(args: &Value, root: &Path) -> String {
     }
 }
 
-fn write_file(args: &Value, root: &Path, confirm: impl FnOnce(&str) -> bool) -> String {
+async fn write_file<C: Confirm>(args: &Value, root: &Path, perms: Permissions, confirm: &C) -> String {
     let (Some(path), Some(content)) = (arg_str(args, "path"), arg_str(args, "content")) else {
         return "ERROR: missing \"path\" or \"content\"".into();
     };
@@ -129,8 +203,8 @@ fn write_file(args: &Value, root: &Path, confirm: impl FnOnce(&str) -> bool) -> 
         Ok(p) => p,
         Err(e) => return format!("ERROR: {e}"),
     };
-    if !confirm(&format!("Write file: {path}? ({} chars)", content.len())) {
-        return "REJECTED: the user did not approve this write.".into();
+    if let Err(rejected) = gate(perms.write, || format!("Write file: {path}? ({} chars)", content.len()), confirm).await {
+        return rejected;
     }
     if let Some(parent) = abs.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -164,10 +238,10 @@ fn list_files(args: &Value, root: &Path) -> String {
     if names.is_empty() { "(empty)".into() } else { names.join("\n") }
 }
 
-fn run_command(args: &Value, root: &Path, confirm: impl FnOnce(&str) -> bool) -> String {
+async fn run_command<C: Confirm>(args: &Value, root: &Path, perms: Permissions, confirm: &C) -> String {
     let Some(cmd) = arg_str(args, "command") else { return "ERROR: missing \"command\"".into() };
-    if !confirm(&format!("Run command: {cmd}")) {
-        return "REJECTED: the user did not approve running this command.".into();
+    if let Err(rejected) = gate(perms.command, || format!("Run command: {cmd}"), confirm).await {
+        return rejected;
     }
     let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
     let output = Command::new(shell).arg(flag).arg(cmd).current_dir(root).output();
@@ -194,11 +268,16 @@ fn run_command(args: &Value, root: &Path, confirm: impl FnOnce(&str) -> bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn tmp_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ember-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ember-test-{}-{}", std::process::id(), rand_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn rand_suffix() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as u64
     }
 
     #[test]
@@ -240,5 +319,89 @@ mod tests {
         let root = tmp_root();
         let abs = resolve_inside(&root, "a/b/c.txt").unwrap();
         assert!(abs.starts_with(root.canonicalize().unwrap()));
+    }
+
+    /// A confirmer that panics if it's ever asked — proves `deny`/`auto` never prompt.
+    struct PanicIfAsked;
+    impl Confirm for PanicIfAsked {
+        async fn ask(&self, message: String) -> bool {
+            panic!("should never have asked, but was asked: {message}");
+        }
+    }
+
+    struct Fixed(bool);
+    impl Confirm for Fixed {
+        async fn ask(&self, _message: String) -> bool {
+            self.0
+        }
+    }
+
+    /// Records whether it was asked, then answers with a fixed value.
+    struct Recording {
+        answer: bool,
+        was_asked: AtomicBool,
+    }
+    impl Confirm for Recording {
+        async fn ask(&self, _message: String) -> bool {
+            self.was_asked.store(true, Ordering::SeqCst);
+            self.answer
+        }
+    }
+
+    #[tokio::test]
+    async fn write_file_denied_never_asks_and_never_writes() {
+        let root = tmp_root();
+        let perms = Permissions { write: PermLevel::Deny, command: PermLevel::Auto };
+        let args = json!({ "path": "denied.txt", "content": "hello" });
+        let result = write_file(&args, &root, perms, &PanicIfAsked).await;
+        assert!(result.starts_with("REJECTED"));
+        assert!(!root.join("denied.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_auto_never_asks_and_writes_immediately() {
+        let root = tmp_root();
+        let perms = Permissions { write: PermLevel::Auto, command: PermLevel::Auto };
+        let args = json!({ "path": "auto.txt", "content": "hello" });
+        let result = write_file(&args, &root, perms, &PanicIfAsked).await;
+        assert!(result.starts_with("OK"));
+        assert_eq!(std::fs::read_to_string(root.join("auto.txt")).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn write_file_ask_writes_only_if_approved() {
+        let root = tmp_root();
+        let perms = Permissions { write: PermLevel::Ask, command: PermLevel::Auto };
+
+        let args = json!({ "path": "approved.txt", "content": "yes" });
+        let confirmer = Recording { answer: true, was_asked: AtomicBool::new(false) };
+        let result = write_file(&args, &root, perms, &confirmer).await;
+        assert!(result.starts_with("OK"));
+        assert!(confirmer.was_asked.load(Ordering::SeqCst));
+        assert!(root.join("approved.txt").exists());
+
+        let args2 = json!({ "path": "rejected.txt", "content": "no" });
+        let result2 = write_file(&args2, &root, perms, &Fixed(false)).await;
+        assert!(result2.starts_with("REJECTED"));
+        assert!(!root.join("rejected.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn run_command_denied_never_asks_and_never_runs() {
+        let root = tmp_root();
+        let perms = Permissions { write: PermLevel::Auto, command: PermLevel::Deny };
+        let args = json!({ "command": "echo should-not-run" });
+        let result = run_command(&args, &root, perms, &PanicIfAsked).await;
+        assert!(result.starts_with("REJECTED"));
+    }
+
+    #[tokio::test]
+    async fn run_command_auto_runs_without_asking() {
+        let root = tmp_root();
+        let perms = Permissions { write: PermLevel::Auto, command: PermLevel::Auto };
+        let cmd = if cfg!(windows) { "echo hello-ember" } else { "echo hello-ember" };
+        let args = json!({ "command": cmd });
+        let result = run_command(&args, &root, perms, &PanicIfAsked).await;
+        assert!(result.contains("hello-ember"), "unexpected output: {result}");
     }
 }

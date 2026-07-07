@@ -1,4 +1,4 @@
-//! ratatui rendering: status bar, scrollable chat log, input box.
+//! ratatui rendering: status bar, scrollable chat log, input box (or confirm prompt).
 
 use crate::app::{App, Msg};
 use ratatui::{
@@ -17,7 +17,11 @@ pub fn render(f: &mut Frame, app: &App) {
 
     render_status(f, app, chunks[0]);
     render_log(f, app, chunks[1]);
-    render_input(f, app, chunks[2]);
+    if let Some((message, _)) = &app.pending_confirm {
+        render_confirm(f, message, chunks[2]);
+    } else {
+        render_input(f, app, chunks[2]);
+    }
 }
 
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
@@ -28,7 +32,10 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         dot,
         Span::raw(format!(" {} — {}{}", app.model, app.status_detail, busy)),
+        Span::styled(format!("   write:{}", app.write_perm.label()), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!(" cmd:{}", app.command_perm.label()), Style::default().fg(Color::DarkGray)),
         Span::styled(format!("   {tokens} tok"), Style::default().fg(Color::DarkGray)),
+        Span::styled("   [F2] write mode  [F3] cmd mode", Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -83,5 +90,14 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.busy { " thinking… " } else { " message (Enter to send) " };
     let block = Block::default().borders(Borders::ALL).title(title);
     let para = Paragraph::new(app.input.as_str()).block(block);
+    f.render_widget(para, area);
+}
+
+fn render_confirm(f: &mut Frame, message: &str, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" approve? [y] yes   [n] no ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let para = Paragraph::new(message).style(Style::default().fg(Color::Yellow)).block(block);
     f.render_widget(para, area);
 }

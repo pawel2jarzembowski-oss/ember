@@ -7,7 +7,8 @@ Think of it as a small, terminal-native cousin of a full editor-integrated codin
 ## What it does
 - **Streamed chat** — the model's reply appears token by token as it's generated.
 - **Agent tools** — `read_file`, `write_file`, `list_files`, `run_command`, all sandboxed to the folder you launch Ember from (no `../` escapes — see `src/tools.rs`).
-- **Live status bar** — shows the model name, connection state, and a running token count for the session.
+- **Permission modes, chosen live** — write/edit and shell commands are each independently `auto` (just do it), `ask` (approve first), or `deny` (never). Press **F2**/**F3** in the app to cycle them without restarting.
+- **Live status bar** — model name, connection state, current permission modes, and a running token count for the session.
 - **Full-screen TUI** — scrollable chat log, dedicated input box, all keyboard-driven.
 
 ## Install / run
@@ -19,28 +20,32 @@ cd ember
 cargo run --release
 ```
 
-Optional flags:
+Optional flags (set the *initial* permission levels; both default to `auto`):
 ```bash
-cargo run --release -- --endpoint http://localhost:11434 --model qwen3:14b
+cargo run --release -- --endpoint http://localhost:11434 --model qwen3:14b --write-mode ask --command-mode ask
 ```
 
 Ember works on whatever folder you run it from — `cd` into a project first.
 
 ### Keys
 - Type to compose a message, **Enter** to send.
+- **F2** — cycle the write/edit permission (auto → ask → deny → auto).
+- **F3** — cycle the shell command permission, same cycle.
+- When something needs approval: **y** to approve, **n** or **Esc** to reject.
 - **↑ / ↓** to scroll the chat log.
-- **Esc** or **Ctrl+C** to quit.
+- **Esc** or **Ctrl+C** to quit (when nothing is pending approval).
 
 ## Safety
 - File operations are restricted to the folder Ember was launched from.
-- v1 runs in **auto-approve mode only** — the agent writes/edits files and runs commands without an interactive confirmation prompt (an "ask first" mode is a natural next step, tracked as future work). Run it in a folder you don't mind it touching, or under version control.
+- Both `write_file` and `run_command` are gated by their own permission level (`auto` / `ask` / `deny`), defaulting to `auto`. Set `--write-mode ask --command-mode ask` (or press F2/F3 once running) if you want to review everything before it happens.
+- `deny` refuses immediately — the agent never even gets to ask.
 - Everything stays local — Ember only talks to the Ollama endpoint you point it at.
 
 ## Testing
 ```bash
 cargo test
 ```
-Runs the path-sandboxing unit tests (`src/tools.rs`) and integration tests for the streaming Ollama client against a fake local server (`tests/ollama_test.rs`) — no real Ollama install required to run the suite.
+Runs the path-sandboxing and permission-gating unit tests (`src/tools.rs` — proves `deny` never prompts and never mutates, `auto` never prompts but does mutate, `ask` only mutates if approved) and integration tests for the streaming Ollama client against a fake local server (`tests/ollama_test.rs`) — no real Ollama install required to run the suite.
 
 ## License
 [MIT](LICENSE)
