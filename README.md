@@ -8,8 +8,9 @@ Think of it as a small, terminal-native cousin of a full editor-integrated codin
 - **Streamed chat** — the model's reply appears token by token as it's generated.
 - **Agent tools** — `read_file`, `write_file`, `list_files`, `run_command`, all sandboxed to the folder you launch Ember from (no `../` escapes — see `src/tools.rs`).
 - **Permission modes, chosen live** — write/edit and shell commands are each independently `auto` (just do it), `ask` (approve first), or `deny` (never). Press **F2**/**F3** in the app to cycle them without restarting.
+- **Model picker** — **F4** lists every model already pulled into Ollama and lets you switch the active one on the fly, no restart needed.
 - **Live status bar** — model name, connection state, current permission modes, and a running token count for the session.
-- **Full-screen TUI** — scrollable chat log, dedicated input box, all keyboard-driven.
+- **Full-screen TUI** — scrollable chat log, an input box that grows as you type (wraps and expands up to a cap instead of staying cramped), all keyboard-driven.
 
 ## Install / run
 Requires a running Ollama instance (`ollama run qwen3:14b` once, to pull a tool-calling-capable model).
@@ -28,12 +29,13 @@ cargo run --release -- --endpoint http://localhost:11434 --model qwen3:14b --wri
 Ember works on whatever folder you run it from — `cd` into a project first.
 
 ### Keys
-- Type to compose a message, **Enter** to send.
+- Type to compose a message (the box grows as you type), **Enter** to send.
 - **F2** — cycle the write/edit permission (auto → ask → deny → auto).
 - **F3** — cycle the shell command permission, same cycle.
+- **F4** — open the model picker; **↑/↓** to move, **Enter** to switch, **Esc** to cancel.
 - When something needs approval: **y** to approve, **n** or **Esc** to reject.
-- **↑ / ↓** to scroll the chat log.
-- **Esc** or **Ctrl+C** to quit (when nothing is pending approval).
+- **↑ / ↓** to scroll the chat log (when not in the model picker).
+- **Esc** or **Ctrl+C** to quit (when nothing is pending approval or open).
 
 ## Safety
 - File operations are restricted to the folder Ember was launched from.

@@ -147,6 +147,27 @@ async fn run(
                         continue;
                     }
 
+                    if let Some(picker) = &mut app.model_picker {
+                        match key.code {
+                            KeyCode::Up => {
+                                if picker.selected > 0 { picker.selected -= 1; }
+                            }
+                            KeyCode::Down => {
+                                if picker.selected + 1 < picker.models.len() { picker.selected += 1; }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(m) = picker.models.get(picker.selected) {
+                                    client.set_model(m.name.clone());
+                                    app.model = m.name.clone();
+                                }
+                                app.model_picker = None;
+                            }
+                            KeyCode::Esc => app.model_picker = None,
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Esc => app.should_quit = true,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -161,6 +182,15 @@ async fn run(
                             let mut p = perms.lock().unwrap();
                             p.command = p.command.cycle();
                             app.command_perm = p.command;
+                        }
+                        KeyCode::F(4) => {
+                            app.open_model_picker();
+                            let client = client.clone();
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let result = client.list_models().await.map_err(|e| e.to_string());
+                                let _ = tx.send(AppEvent::ModelsLoaded(result));
+                            });
                         }
                         KeyCode::Enter => {
                             if let Some(text) = app.submit() {

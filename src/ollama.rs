@@ -76,13 +76,23 @@ pub struct ModelInfo {
 
 pub struct OllamaClient {
     endpoint: String,
-    model: String,
+    model: std::sync::RwLock<String>,
     http: reqwest::Client,
 }
 
 impl OllamaClient {
     pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
-        Self { endpoint: endpoint.into(), model: model.into(), http: reqwest::Client::new() }
+        Self { endpoint: endpoint.into(), model: std::sync::RwLock::new(model.into()), http: reqwest::Client::new() }
+    }
+
+    /// Switches the active model at runtime — safe to call while a chat is in flight; only
+    /// the *next* request picks it up.
+    pub fn set_model(&self, model: String) {
+        *self.model.write().unwrap() = model;
+    }
+
+    pub fn model(&self) -> String {
+        self.model.read().unwrap().clone()
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -103,7 +113,7 @@ impl OllamaClient {
         let url = format!("{}/api/show", self.endpoint);
         self.http
             .post(&url)
-            .json(&serde_json::json!({ "model": self.model }))
+            .json(&serde_json::json!({ "model": self.model() }))
             .send()
             .await?
             .error_for_status()
@@ -121,7 +131,7 @@ impl OllamaClient {
     ) -> Result<ChatResult> {
         let url = format!("{}/api/chat", self.endpoint);
         let body = serde_json::json!({
-            "model": self.model,
+            "model": self.model(),
             "messages": messages,
             "tools": if tools.is_empty() { Value::Null } else { serde_json::to_value(tools)? },
             "stream": true,

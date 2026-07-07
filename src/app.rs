@@ -1,6 +1,7 @@
 //! TUI application state and how it reacts to agent/terminal events.
 
 use crate::agent::AgentEvent;
+use crate::ollama::ModelInfo;
 use crate::tools::PermLevel;
 use tokio::sync::oneshot;
 
@@ -17,6 +18,14 @@ pub enum AppEvent {
     /// The agent wants to do something gated by an `Ask` permission — the UI shows `message`
     /// and, once the user presses y/n, sends the answer back down `respond`.
     ConfirmRequest { message: String, respond: oneshot::Sender<bool> },
+    ModelsLoaded(Result<Vec<ModelInfo>, String>),
+}
+
+pub struct ModelPicker {
+    pub models: Vec<ModelInfo>,
+    pub selected: usize,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 pub struct App {
@@ -32,6 +41,7 @@ pub struct App {
     pub write_perm: PermLevel,
     pub command_perm: PermLevel,
     pub pending_confirm: Option<(String, oneshot::Sender<bool>)>,
+    pub model_picker: Option<ModelPicker>,
     current_assistant: Option<usize>,
     open_tool: Option<usize>,
     pub should_quit: bool,
@@ -52,14 +62,19 @@ impl App {
             write_perm: PermLevel::Auto,
             command_perm: PermLevel::Auto,
             pending_confirm: None,
+            model_picker: None,
             current_assistant: None,
             open_tool: None,
             should_quit: false,
         }
     }
 
+    pub fn open_model_picker(&mut self) {
+        self.model_picker = Some(ModelPicker { models: Vec::new(), selected: 0, loading: true, error: None });
+    }
+
     pub fn submit(&mut self) -> Option<String> {
-        if self.busy || self.pending_confirm.is_some() || self.input.trim().is_empty() {
+        if self.busy || self.pending_confirm.is_some() || self.model_picker.is_some() || self.input.trim().is_empty() {
             return None;
         }
         let text = std::mem::take(&mut self.input);
@@ -92,6 +107,18 @@ impl App {
             }
             AppEvent::ConfirmRequest { message, respond } => {
                 self.pending_confirm = Some((message, respond));
+            }
+            AppEvent::ModelsLoaded(result) => {
+                if let Some(picker) = &mut self.model_picker {
+                    picker.loading = false;
+                    match result {
+                        Ok(models) => {
+                            picker.selected = models.iter().position(|m| m.name == self.model).unwrap_or(0);
+                            picker.models = models;
+                        }
+                        Err(e) => picker.error = Some(e),
+                    }
+                }
             }
         }
     }
